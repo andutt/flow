@@ -1,0 +1,285 @@
+#!/usr/bin/perl
+#
+#    Copyright Andreas Utterberg Thundera (c) All rights Reserved 2016
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+#
+our $version = "FLOW Application Cycle Control. Version:1.1 (2016 www.thundera.se).";
+our $sysconfig	=	"/etc/flow/flow.conf";
+our $debug	=	"0";
+our $action;
+our $socket;
+our $client;
+our @messages;
+our %messages;
+our $nr_messages=	"0";
+our $parameters	=	"0";
+our $drop	=	"0";
+our ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
+our $date=sprintf("20%02d%02d%02d",$year%100,$mon+1,$mday);
+our $time=sprintf("%02d:%02d:%02d",$hour,$min,$sec);
+
+# Configuration parameters
+our $THIS_HOST;
+our $TYPE;
+our $MODE;
+our $MASTER_SERVER;
+our $MASTER_PORT;
+our $SSL_CRT;
+our $SSL_KEY;
+our $KEY;
+our $SERVICE;
+our $SERVICE_MODE;
+our $SERVICE_REMOTE;
+our $SERVICE_EXITOK;
+our $SERVICE_ONERROR;
+our $SERVICE_NOTIFY;
+our $SERVICE_EXECUTE;
+
+use IO::Socket::SSL;
+use IO::Socket::INET;
+use strict;
+use warnings;
+
+
+sub load_sysconfig_parameters {
+
+my @tmp;
+
+      open("sysconfig","<$sysconfig")
+                or die "ERROR Failed to open configuration file for reading config:$sysconfig error:$!\n";
+        for(<sysconfig>) {
+                chomp;
+                if(/^#/) {
+                        next;
+                }
+                if(/^$/) {
+                        next;
+                }
+                if(/^THIS_HOST/) {
+                        @tmp=split("=","$_");
+                        $THIS_HOST="$tmp[1]";
+                        $parameters++;
+                }
+                if(/^TYPE/) {
+                        @tmp=split("=","$_");
+                        $TYPE="$tmp[1]";
+                        $parameters++;
+                }
+                if(/^MODE/) {
+                        @tmp=split("=","$_");
+                        $MODE="$tmp[1]";
+                        $parameters++;
+                }
+                if(/^MASTER_SERVER/) {
+                        @tmp=split("=","$_");
+                        $MASTER_SERVER="$tmp[1]";
+                        $parameters++;
+                }
+                if(/^MASTER_PORT/) {
+                        @tmp=split("=","$_");
+                        $MASTER_PORT="$tmp[1]";
+                        $parameters++;
+                }
+                if(/^SSL_CRT/) {
+                        @tmp=split("=","$_");
+                        $SSL_CRT="$tmp[1]";
+                        $parameters++;
+                }
+                if(/^SSL_KEY/) {
+                        @tmp=split("=","$_");
+                        $SSL_KEY="$tmp[1]";
+                        $parameters++;
+                }
+                if(/^KEY/) {
+                        @tmp=split("=","$_");
+                        $KEY="$tmp[1]";
+                        $parameters++;
+                }
+	}
+	close("sysconfig")
+		or die $!;
+
+print "[$date,$time] [INFO] $parameters parameters loaded.\n";
+
+# End of subfunction
+}
+
+sub start_master_listener {
+
+$socket = IO::Socket::SSL->new(
+	LocalAddr	=> $MASTER_SERVER,
+	LocalPort       => $MASTER_PORT,
+	Proto           => 'tcp',
+	Reuse           => 1,
+	Listen          => 5,
+	SSL_key_file    => "$SSL_KEY",
+	SSL_cert_file   => "$SSL_CRT"
+) or die "ERROR Failed to start the Flow Network Service on $MASTER_SERVER and port $MASTER_PORT:($!)\n";
+
+print "\n$version\n";
+print "\n[$date,$time] [INIT] I am the Master/Slave Network Service. Using ssl and are pretty awesome in general.\n";
+
+while(1) {
+
+print "[$date,$time] [INFO] Waiting for connections.\n";
+my $c_addr;
+
+	while ($client = $socket->accept()) {
+		my $childpid;
+		my $message;
+		my $subject_name;
+		my $issuer_name;
+
+		if (!$client) {
+			print "[$date,$time] [ERROR] No defined packet:$socket->errstr\n";
+        		next;
+		}
+		my $client_address = $client->peerhost();
+    		my $client_port = $client->peerport();
+		print "[$date,$time] [CONNECTION] Connection from $client_address from port $client_port\n";
+
+		my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
+		my $date=sprintf("20%02d%02d%02d",$year%100,$mon+1,$mday);
+		my $time=sprintf("%02d:%02d:%02d",$hour,$min,$sec);
+
+		$message = <$client>;
+		chomp $message;
+		
+		if($debug) {
+			print "[$date,$time] [MESSAGE] $message\n";
+		}
+
+		my @tmp=split(":","$message");
+		if ("$tmp[0]" ne "$KEY") {
+			print "[$date,$time] [DROP] Dropping message from due to invalid key.\n";
+			print $client "QUIT\n";
+			next;
+		} else {
+
+
+			if ("$tmp[1]" eq "REQUEST") {
+
+				foreach my $key (keys %messages) {
+        				my $value = $messages{$key};
+
+					if($debug) {
+						print "\t[REQUEST] Checking->$value->{'MSGTYPE'}:$value->{'HOST'}:$value->{'SERVICE'}:$value->{'ACTION'}:$value->{'ACTIONCODE'}\n";
+					}
+
+					if("$tmp[2]" eq "$value->{'HOST'}" && "$value->{'MSGTYPE'}" eq "ACTION") {
+                                                        print "[$date,$time] [FOUND] Found a request from $tmp[2] and service $tmp[3] that have a waiting action.\n";
+                                                        print $client "EXECUTE\n";
+                                                        print "[$date,$time] [MASTER OK] Authorization given for $tmp[2] and service $tmp[3].\n";
+							delete $messages{$key};
+					}
+				}
+			}
+
+			if ("$tmp[1]" eq "CHECK") {
+
+				foreach my $key (keys %messages) {
+        				my $value = $messages{$key};
+
+					if($debug) {
+						print "\t[CHECK] Checking->$value->{'MSGTYPE'}:$value->{'HOST'}:$value->{'SERVICE'}:$value->{'ACTION'}:$value->{'ACTIONCODE'}\n";
+					}
+
+					if("$tmp[2]" eq "$value->{'HOST'}" && "$value->{'SERVICE'}" eq "$tmp[3]" && "$value->{'MSGTYPE'}" eq "STATUS") {
+						print "[$date,$time] [FOUND] Found a status from $tmp[2] and service $tmp[3] that have a waiting check.\n";
+						print $client "$value->{'ACTIONCODE'}\n";
+						print "[$date,$time] [MASTER OK] Mastercheck status given $value->{'ACTIONCODE'} for $tmp[2] and service $tmp[3].\n";
+						#delete $messages{$key};
+					}
+				}
+			}
+
+			if ("$tmp[1]" eq "SLAVECHECK") {
+
+				foreach my $key (keys %messages) {
+        				my $value = $messages{$key};
+
+					if($debug) {
+						print "\t[SLAVECHECK] Checking->$value->{'MSGTYPE'}:$value->{'HOST'}:$value->{'SERVICE'}:$value->{'ACTION'}:$value->{'ACTIONCODE'}\n";
+					}
+
+					if("$tmp[2]" eq "$value->{'HOST'}" && "$value->{'SERVICE'}" eq "$tmp[3]" && "$value->{'MSGTYPE'}" eq "STATUS") {
+						print "[$date,$time] [FOUND] Found a status from $tmp[2] and service $tmp[3] that have a waiting check.\n";
+						print $client "$value->{'ACTIONCODE'}\n";
+						print "[$date,$time] [MASTER OK] Slavecheck status given $value->{'ACTIONCODE'} for $tmp[2] and service $tmp[3].\n";
+						#delete $messages{$key};
+					}
+				}
+			}
+
+			if ("$tmp[1]" eq "DISCOVER") {
+
+				foreach my $key (keys %messages) {
+        				my $value = $messages{$key};
+
+					if($debug) {
+						print "\t[DISCOVER] Checking->$value->{'MSGTYPE'}:$value->{'HOST'}:$value->{'SERVICE'}:$value->{'ACTION'}:$value->{'ACTIONCODE'}\n";
+					}
+
+					if("$tmp[2]" eq "$value->{'HOST'}" && "$value->{'MSGTYPE'}" eq "ACTION") {
+                                                        print "[$date,$time] [FOUND] Found a request from $tmp[2] and service $tmp[3] that have a waiting action.\n";
+                                                        print $client "$value->{'ACTION'}\n";
+                                                        print "[$date,$time] [MASTER OK] Discover $value->{'ACTION'} given for $tmp[2] and service $tmp[3].\n";
+							#delete $messages{$key};
+					}
+				}
+			}
+			
+			foreach my $key (keys %messages) {
+        			my $value = $messages{$key};
+
+				if("$tmp[1]" eq "$value->{'MSGTYPE'}" && "$tmp[2]" eq "$value->{'HOST'}" && "$tmp[3]" eq "$value->{'SERVICE'}" && "$tmp[4]" eq "$value->{'ACTION'}") {
+					$drop="1";
+				}
+			}
+
+			if ("$tmp[1]" eq "CLEANMEM") {
+				%messages = ();
+				@messages = ();
+				print "[$date,$time] [CLEAN] Total messages in memory: ". keys( %messages ) .".\n";
+
+			} else {
+				if("$drop" == "0") {
+					print "[$date,$time] [ACCEPT] [$nr_messages] New $tmp[1] message accepted.\n";
+					$messages{"$nr_messages"}{'KEY'} = "$tmp[0]";
+					$messages{"$nr_messages"}{'MSGTYPE'} = "$tmp[1]";
+					$messages{"$nr_messages"}{'HOST'} = "$tmp[2]";
+					$messages{"$nr_messages"}{'SERVICE'} = "$tmp[3]";
+					$messages{"$nr_messages"}{'ACTION'} = "$tmp[4]";
+					$messages{"$nr_messages"}{'ACTIONCODE'} = "$tmp[5]";
+					$nr_messages++;
+					print "[$date,$time] [MEMORY] Total messages in memory: ". keys( %messages ) .".\n";
+				} else {
+					$drop="0";
+				}
+			}
+
+		}
+		print $client "QUIT\n";
+	 }
+
+}
+
+
+# End of subfunction
+}
+
+load_sysconfig_parameters();
+start_master_listener();

@@ -1,0 +1,961 @@
+#!/usr/bin/perl
+#
+#    Copyright Andreas Utterberg Thundera (c) All rights Reserved 2016
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+#
+our $version = "FLOW Application Cycle Control. (2016 www.thundera.se).";
+our ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
+our $date=sprintf("20%02d%02d%02d",$year%100,$mon+1,$mday);
+our $time=sprintf("%02d:%02d:%02d",$hour,$min,$sec);
+our $action;
+our $toservice;
+our $fromservice;
+our $justunit;
+our $sleep="1";
+our @services;
+our $sysconfig		=	"/etc/flow/flow.conf";
+our $sysconfig_dir	=	"/etc/flow";
+our $parameters	=	"0";
+our $servicemax	=	"50";
+our $ecode;
+
+# Configuration parameters
+our $THIS_HOST;
+our $TYPE;
+our $MASTER_SERVER;
+our $MASTER_PORT;
+our $MASTER_AUTH_WAIT;
+our $KEY;
+our $SSL_CRT;
+our $SSL_KEY;
+our $SERVICE;
+our $SERVICE_MODE;
+our $SERVICE_REMOTE;
+our $SERVICE_UNIT;
+our $SERVICE_EXITOK;
+our $SERVICE_ONERROR;
+our $SERVICE_NOTIFY;
+our $SERVICE_EXECUTE;
+
+require IO::Socket::SSL;
+use strict;
+use warnings;
+
+
+sub load_sysconfig_parameters {
+
+my @tmp;
+
+      open("sysconfig","<$sysconfig")
+                or die "ERROR Failed to open configuration file for reading config:$sysconfig error:$!\n";
+        for(<sysconfig>) {
+                chomp;
+                if(/^#/) {
+                        next;
+                }
+                if(/^$/) {
+                        next;
+                }
+                if(/^THIS_HOST/) {
+                        @tmp=split("=","$_");
+                        $THIS_HOST="$tmp[1]";
+                        $parameters++;
+                }
+                if(/^TYPE/) {
+                        @tmp=split("=","$_");
+                        $TYPE="$tmp[1]";
+                        $parameters++;
+                }
+                if(/^MASTER_SERVER/) {
+                        @tmp=split("=","$_");
+                        $MASTER_SERVER="$tmp[1]";
+                        $parameters++;
+                }
+                if(/^MASTER_PORT/) {
+                        @tmp=split("=","$_");
+                        $MASTER_PORT="$tmp[1]";
+                        $parameters++;
+                }
+                if(/^MASTER_AUTH_WAIT/) {
+                        @tmp=split("=","$_");
+                        $MASTER_AUTH_WAIT="$tmp[1]";
+                        $parameters++;
+                }
+                if(/^SSL_CRT/) {
+                        @tmp=split("=","$_");
+                        $SSL_CRT="$tmp[1]";
+                        $parameters++;
+                }
+                if(/^SSL_KEY/) {
+                        @tmp=split("=","$_");
+                        $SSL_KEY="$tmp[1]";
+                        $parameters++;
+                }
+                if(/^KEY/) {
+                        @tmp=split("=","$_");
+                        $KEY="$tmp[1]";
+                        $parameters++;
+                }
+                if(/^SERVICE_/) {
+			push @services, $_;
+                        $parameters++;
+                }
+	}
+	close("sysconfig")
+		or die "ERROR Failed to close configuration $sysconfig ($!)\n";
+
+print "[$date,$time] [INFO] $parameters parameters loaded.\n";
+
+# End of subfunction
+}
+
+sub setup_ssl {
+
+
+if (! -f "$SSL_CRT" || ! -f $SSL_KEY) {
+	print "[$date,$time] [NOTICE] No ssl key/certificate found ($SSL_KEY/$SSL_CRT). Setting up Flow enviroment.\n";
+	`openssl genrsa 2048 > $SSL_KEY`;
+	`openssl req -new -x509 -nodes -sha1 -days 3650 -key $SSL_KEY > $SSL_CRT`;
+	`openssl x509 -noout -fingerprint -text < $SSL_CRT > $sysconfig_dir/ssl.info`;
+	`cat $SSL_CRT $SSL_KEY > $sysconfig_dir/ssl.pem`;
+	`chmod 444 $SSL_KEY`;
+	`chmod 444 $sysconfig_dir/ssl.pem`;
+} else {
+	print "[$date,$time] [INFO] No setup needed. All certs/keys are present.\n"
+}
+
+# End of subfunction
+}
+
+sub check_if_master {
+
+if(!defined($TYPE)) {
+	print "[$date,$time] [ERROR] No flow type defined. master|client|slave are valid types.\n";
+	exit;
+}
+
+if ("$TYPE" eq "master") {
+
+	if("$action" eq "start") {
+	
+		# Setup ssl certificates and keys if nessesary.
+		setup_ssl();
+
+		print "[$date,$time] [INFO] Im The MASTER! of this flow.\n";
+		master_post_to_master("$KEY:CLEANMEM:NONE:NONE:NONE:NONE");
+	}
+	if("$action" eq "stop") {
+	
+		# Setup ssl certificates and keys if nessesary.
+		setup_ssl();
+
+		print "[$date,$time] [INFO] Im The MASTER! of this flow.\n";
+		master_post_to_master("$KEY:CLEANMEM:NONE:NONE:NONE:NONE");
+	}
+
+} 
+if ("$TYPE" eq "slave") {
+	print "[$date,$time] [INFO] Im a slave. Checking authorization with master.\n";
+} else {
+	print "[$date,$time] [INFO] Im a client. No master authorization checking needed.\n";
+}
+
+# End of subfunction
+}
+
+sub start_services() {
+
+my @tmp;
+my @tmp2;
+
+for (my $i=0; $i <= $servicemax; $i++) {
+
+	for(@services) {
+		chomp;
+
+		if (/^SERVICE_$i/) {
+			print "[$date,$time] [INFO] Service $i found.\n";
+	  
+		if(defined($fromservice)) {
+
+			if ( "$i" < "$fromservice") {
+				print "[$date,$time] [FROMSERVICE] Fromservice service ($i) < $fromservice. Not yet there.\n";
+				next;
+	  		}
+		}
+
+			@tmp=split(",","$_");
+			for(@tmp) {
+
+				if(/^SERVICE_/) {
+					@tmp2=split("=","$_");
+					$SERVICE=$tmp2[1];
+					print "\t\t\t\tSERVICE:$SERVICE\n";
+				}
+				if(/^MODE=/) {
+					@tmp2=split("=","$_");
+					$SERVICE_MODE=$tmp2[1];
+					print "\t\t\t\tMODE:$SERVICE_MODE\n";
+				}
+				if(/^UNIT=/) {
+					@tmp2=split("=","$_");
+					$SERVICE_UNIT=$tmp2[1];
+					print "\t\t\t\tUNIT:$SERVICE_UNIT\n";
+				}
+				if(/^ONHOST=/) {
+					@tmp2=split("=","$_");
+					$SERVICE_REMOTE=$tmp2[1];
+					print "\t\t\t\tREMOTE:$SERVICE_REMOTE\n";
+				}
+				if(/^EXITOK=/) {
+					@tmp2=split("=","$_");
+					$SERVICE_EXITOK=$tmp2[1];
+					print "\t\t\t\tEXITOK:$SERVICE_EXITOK\n";
+				}
+				if(/^ONERROR=/) {
+					@tmp2=split("=","$_");
+					$SERVICE_ONERROR=$tmp2[1];
+					print "\t\t\t\tONERROR:$SERVICE_ONERROR\n";
+				}
+				if(/^NOTIFY=/) {
+					@tmp2=split("=","$_");
+					$SERVICE_NOTIFY=$tmp2[1];
+					print "\t\t\t\tNOTIFY:$SERVICE_NOTIFY\n";
+				}
+				if(/^EXECUTE=/) {
+					@tmp2=split("=","$_");
+					$SERVICE_EXECUTE=$tmp2[1];
+					print "\t\t\t\tEXECUTE:$SERVICE_EXECUTE\n";
+
+				# End ifs
+				}
+
+			# End for tmp	
+			}
+
+			if(!defined($justunit)) {
+				print "[$date,$time] [START] Starting $SERVICE -> $SERVICE_EXECUTE\n";
+				service_execute("$SERVICE_EXECUTE");
+			} else {
+
+				if("$justunit" eq "$SERVICE_UNIT") {
+					print "[$date,$time] [UNIT] Unit cycling used ($justunit = $SERVICE_UNIT)\n";
+					print "[$date,$time] [START] Starting $SERVICE -> $SERVICE_EXECUTE\n";
+					service_execute("$SERVICE_EXECUTE");
+				} else {
+					print "[$date,$time] [UNIT] Service $SERVICE skipped due to unit cycling ($justunit != $SERVICE_UNIT)\n";
+				}
+			}
+
+		# End if match
+		}
+
+	# End for services
+	}
+		
+	if(defined($toservice)) {
+
+	 	 if ("$toservice" == "$i") {
+			print "[$date,$time] [TOSERVICE] To service $toservice reached. Stopping cycle.\n";
+			last;
+	  	}
+	}
+
+# End for i
+}
+
+# End of subfunction
+}
+
+sub service_execute {
+
+my $execute_this=$_[0];
+
+if(!defined($execute_this)) {
+	print "[$date,$time] [ERROR] the execute program was not sent forward to me (sub service_execute) Internal ERROR!\n";
+	exit;
+}
+if ("$SERVICE_MODE" eq "local") {
+	print "[$date,$time] [INFO] Local program execution\n";
+	print "-----------------------------------------------------\n";
+
+
+	if ( ! -f "$execute_this" ) {
+		print "[$date,$time] [ERROR] The excecute program:$execute_this doesnt exist.\n";
+		exit;
+	}
+	if ( ! -x "$execute_this" ) {
+		print "[$date,$time] [ERROR] The excecute program:$execute_this is not executeble.\n";
+		exit;
+	}
+
+	if(("$action" eq "startlocal") || ("$action" eq "stoplocal")) {
+		print "[$date,$time] [DISCARD] Start|Stop local executed, will discard master/slave releations.\n";
+
+		if ("$SERVICE_MODE" eq "remote") {
+			print "[$date,$time] [INFO] Will not try to execute remote service $SERVICE.\n";
+			return;
+		}
+		
+	} else {
+	
+		if( "$TYPE" eq "slave" ) {
+
+			print "[$date,$time] [INFO] Running as slave checking with MASTER for authority.\n";
+			my $answer="0";
+				for (my $i=0; $i <= $MASTER_AUTH_WAIT; $i++) {
+
+					($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
+					$date=sprintf("20%02d%02d%02d",$year%100,$mon+1,$mday);
+					$time=sprintf("%02d:%02d:%02d",$hour,$min,$sec);
+
+					if(slave_post_to_master("$KEY:REQUEST:$THIS_HOST:$SERVICE:$action:NONE") == 1) {
+						print "[$date,$time] [SLAVECHECK] [$i/$MASTER_AUTH_WAIT] Pending answer from master for service:$SERVICE.\n";
+						sleep($sleep);
+						$answer="0";
+					} else {
+						print "-----------------------------------------------------\n";
+						$answer="1";
+						last;
+					}
+				}
+
+				if($answer == "0") {
+					print "[$date,$time] [ERROR] No answer recieved from master in $MASTER_AUTH_WAIT loops. Aborting!\n";
+					exit(1);
+				}	
+		# End if slave
+		}
+	# End startlocal
+	}
+
+	if("$action" eq "startlocal") {
+		print "[$date,$time] [EXECUTING] $execute_this startlocal\n";
+		$ecode=system("$execute_this startlocal");
+	}
+	if("$action" eq "stoplocal") {
+		print "[$date,$time] [EXECUTING] $execute_this stoplocal\n";
+		$ecode=system("$execute_this stoplocal");
+	}
+	if("$action" eq "stop") {
+		print "[$date,$time] [EXECUTING] $execute_this stop\n";
+		$ecode=system("$execute_this stop");
+	}
+	if("$action" eq "start") {
+		print "[$date,$time] [EXECUTING] $execute_this start\n";
+		$ecode=system("$execute_this start");
+	}
+	if ($ecode == $SERVICE_EXITOK) {
+		print "-----------------------------------------------------\n";
+
+		if( "$TYPE" eq "slave" ) {
+
+			if(("$action" eq "startlocal") || ("$action" eq "stoplocal")) {
+				print "[$date,$time] [EXECUTEDOK] $execute_this ended [OK]\n";
+			} else {
+				print "[$date,$time] [EXECUTEDOK] $execute_this $action ended [OK] Sending status OK to master\n";
+				slave_post_to_master("$KEY:STATUS:$THIS_HOST:$SERVICE:$action:OK:");
+			}
+		} else {
+				print "[$date,$time] [EXECUTEDOK] $execute_this $action ended [OK]\n";
+
+		}
+	} else {
+		print "-----------------------------------------------------\n";
+		print "[$date,$time] [ERROR] $execute_this $action ended with exitcode other then defined EXITOK($SERVICE_EXITOK)\n";
+
+		if("$SERVICE_ONERROR" eq "stop" ) {
+			print "[$date,$time] [STOP] ONERROR for $SERVICE was set to:$SERVICE_ONERROR. Stopping now!\n";
+		
+			if( "$TYPE" eq "slave" ) {
+				slave_post_to_master("$KEY:STATUS:$THIS_HOST:$SERVICE:$action:ERRORSTOP:");
+			}
+			if( "$TYPE" eq "client" ) {
+				exit(1);
+			}
+
+		} else {
+			if( "$TYPE" eq "slave" ) {
+				
+				if( "$action" ne "startlocal") {
+					slave_post_to_master("$KEY:STATUS:$THIS_HOST:$SERVICE:$action:ERRORGO:");
+				}
+			}
+			print "[$date,$time] [GO_ON] ONERROR for $SERVICE was set to:$SERVICE_ONERROR. Going on with cycle process.\n";
+		}
+	}
+
+} else {
+	if( "$action" eq "startlocal" ) {
+		print "[$date,$time] [DISCARD] Startlocal executed, will discard master/slave releations.\n";
+	} else {
+		print "[$date,$time] [INFO] Remote execution -> $SERVICE_REMOTE\n";
+		master_post_to_master("$KEY:ACTION:$SERVICE_REMOTE:$SERVICE:$action:NONE");
+
+        	for (my $i=0; $i <= $MASTER_AUTH_WAIT; $i++) {
+
+                        my $status = master_post_to_master("$KEY:CHECK:$SERVICE_REMOTE:$SERVICE:$action:NONE");
+
+			if($status == 2) {
+				print "[$date,$time] [MASTERCHECK] Status recieved: OK!\n";
+				last;
+			}
+			if($status == 3) {
+				print "[$date,$time] [MASTERCHECK] Status recieved: ERROR! Stop!\n";
+				last;
+			}
+			if($status == 4) {
+				print "[$date,$time] [MASTERCHECK] Status recieved: ERROR! Go!\n";
+				last;
+			} else {
+				print "[$date,$time] [MASTERCHECK] [$i/$MASTER_AUTH_WAIT] Waiting for status for $SERVICE\n";
+			}
+	  	sleep($sleep);
+        	}
+	# End if startlocal
+	}
+}
+
+
+# End of subfunction
+}
+
+sub slave_post_to_master {
+
+my $sendinfo=$_[0];
+
+my $socket = IO::Socket::SSL->new( 
+	PeerHost => "$MASTER_SERVER",
+	PeerPort => "$MASTER_PORT",
+	SSL_verify_mode => 'SSL_VERIFY_PEER',
+	Reuse    => "1")
+		or die "ERROR Unable to connect to master service $MASTER_SERVER on port $MASTER_PORT. Verify its state and try again: ($!)\n";
+
+# flush after every write
+$| = 1;
+my $data;
+
+print $socket "$sendinfo\n";
+$data = <$socket>;
+
+chomp $data;
+#print "SLAVE_POST_TO_MASTER:$data\n";
+
+	if("$data" =~/QUIT/) {
+		return(1);
+	}
+	if("$data" =~/EXECUTE/) {
+		print "[$date,$time] [SLAVECHECK] Authority received from MASTER for $SERVICE. Executing!\n";
+		return(0);
+	}
+	if("$data" =~/OK/) {
+		print "[$date,$time] [SLAVECHECK] $SERVICE ended with OK.\n";
+		return(2);
+	}
+	if("$data" =~/ERROR/) {
+		print "[$date,$time] [SLAVECHECK] $SERVICE ended with ERROR. Stop!\n";
+		return(3);
+	}
+	if("$data" =~/ERRORGO/) {
+		print "[$date,$time] [SLAVECHECK] $SERVICE ended with ERROR. Go!\n";
+		return(4);
+	}
+
+$socket->close();
+
+
+# End of subfunction
+}
+
+sub master_post_to_master {
+
+my $sendinfo=$_[0];
+
+my $socket = IO::Socket::SSL->new(
+        PeerHost => "$MASTER_SERVER",
+        PeerPort => "$MASTER_PORT",
+        SSL_verify_mode => 'SSL_VERIFY_PEER',
+        Reuse    => "1")
+                or die "ERROR Unable to connect to master service $MASTER_SERVER on port $MASTER_PORT. Verify its state and try again: ($!)\n";
+
+# flush after every write
+$| = 1;
+my $data;
+
+print $socket "$sendinfo\n";
+$data = <$socket>;
+
+chomp $data;
+#print "MASTER_POST_TO_MASTER:$data\n";
+
+        if("$data" =~/QUIT/) {
+                print "[$date,$time] [MASTERCHECK] Pending answer from master for service:$SERVICE.\n";
+                return(1);
+        }
+        if("$data" =~/EXECUTE/) {
+                print "[$date,$time] [MASTERCHECK] Authority received from MASTER for $SERVICE. Executing!\n";
+                return(0);
+        }
+        if("$data" =~/OK/) {
+                print "[$date,$time] [MASTERCHECK] $SERVICE ended with OK.\n";
+                return(2);
+        }
+        if("$data" =~/ERROR/) {
+                print "[$date,$time] [MASTERCHECK] $SERVICE ended with ERROR. Stop!\n";
+                return(3);
+        }
+        if("$data" =~/ERRORGO/) {
+                print "[$date,$time] [MASTERCHECK] $SERVICE ended with ERROR. Go!\n";
+                return(4);
+        }
+
+$socket->close();
+
+
+# End of subfunction
+}
+
+sub check_discover_with_master {
+
+my $sendinfo=$_[0];
+
+my $socket = IO::Socket::SSL->new( 
+	PeerHost => "$MASTER_SERVER",
+	PeerPort => "$MASTER_PORT",
+	SSL_verify_mode => 'SSL_VERIFY_PEER',
+	Reuse    => "1")
+		or die "ERROR Unable to connect to master service $MASTER_SERVER on port $MASTER_PORT. Verify its state and try again: ($!)\n";
+
+# flush after every write
+$| = 1;
+my $data;
+
+print $socket "$sendinfo\n";
+$data = <$socket>;
+
+chomp $data;
+
+	if("$data" =~/QUIT/) {
+		print "[$date,$time] [DISCOVER] No requests active for me.\n";
+		return(1);
+	}
+	if("$data" =~/start/) {
+		print "[$date,$time] [DISCOVER] Received start request from master.\n";
+		return(0);
+	}
+	if("$data" =~/stop/) {
+		print "[$date,$time] [DISCOVER] Received stop request from master.\n";
+		return(2);
+	}
+	if("$data" =~/restart/) {
+		print "[$date,$time] [DISCOVER] Received restart request from master.\n";
+		return(3);
+	}
+	if("$data" =~/status/) {
+		print "[$date,$time] [DISCOVER] Received status request from master.\n";
+		return(4);
+	}
+
+$socket->close();
+
+
+# End of subfunction
+}
+
+sub program_info {
+print "\n";
+print "$version\n";
+print "\n";
+print "Ex: $0 startlocal toservice=5\n";
+print "Ex: $0 startlocal fromservice=3 toservice=5\n";
+print "Ex: $0 start justunit=base\n";
+print "Ex: $0 start\n";
+print "Ex: $0 stop\n";
+print "Ex: $0 setup\n";
+print "\n";
+print "Operation:\n";
+print "----------\n";
+print "start\t\t:Starts defined services.\n";
+print "stop\t\t:Stops defined services.\n";
+print "status\t\t:Shows active status for defined services.\n";
+print "restart\t\t:Restart defined services.\n";
+print "discover\t:Check for cycle flows. (Only in Master/Slave mode)\n";
+print "\n";
+print "Setup:\n";
+print "------\n";
+print "setup\t\t:Create master certificates and keys.\n";
+print "\n";
+print "Override:\n";
+print "---------\n";
+print "startlocal\t:Starts defined local services. (Master/slave relations and remote dependencies will be discarded)\n";
+print "stoplocal\t:Stops defined local services. (Master/slave relations remote dependencies will be discarded)\n";
+print "toservice=x\t:Cycle to this defined service, then stop.\n";
+print "fromservice=x\t:Cycle from this defined service, skip services before.\n";
+print "justunit=x\t:Only cycle services configured as members of this unit.\n";
+print "\n";
+exit;
+
+# End of subfunction
+}
+
+sub stop_services() {
+
+my @tmp;
+my @tmp2;
+
+for (my $i = $servicemax; $i >= 0; $i--) {
+
+	for(@services) {
+		chomp;
+
+		if (/^SERVICE_$i/) {
+			print "[$date,$time] [INFO] Service $i found.\n";
+		
+			if(defined($fromservice)) {
+
+				if ( "$i" > "$fromservice") {
+					print "[$date,$time] [FROMSERVICE] Fromservice service ($i) > $fromservice. Not yet there.\n";
+					next;
+	  			}
+			}
+
+			@tmp=split(",","$_");
+			for(@tmp) {
+
+				if(/^SERVICE_/) {
+					@tmp2=split("=","$_");
+					$SERVICE=$tmp2[1];
+					print "\t\t\t\tSERVICE:$SERVICE\n";
+				}
+				if(/^MODE=/) {
+					@tmp2=split("=","$_");
+					$SERVICE_MODE=$tmp2[1];
+					print "\t\t\t\tMODE:$SERVICE_MODE\n";
+				}
+				if(/^UNIT=/) {
+					@tmp2=split("=","$_");
+					$SERVICE_UNIT=$tmp2[1];
+					print "\t\t\t\tUNIT:$SERVICE_UNIT\n";
+				}
+				if(/^ONHOST=/) {
+					@tmp2=split("=","$_");
+					$SERVICE_REMOTE=$tmp2[1];
+					print "\t\t\t\tREMOTE:$SERVICE_REMOTE\n";
+				}
+				if(/^EXITOK=/) {
+					@tmp2=split("=","$_");
+					$SERVICE_EXITOK=$tmp2[1];
+					print "\t\t\t\tEXITOK:$SERVICE_EXITOK\n";
+				}
+				if(/^ONERROR=/) {
+					@tmp2=split("=","$_");
+					$SERVICE_ONERROR=$tmp2[1];
+					print "\t\t\t\tONERROR:$SERVICE_ONERROR\n";
+				}
+				if(/^NOTIFY=/) {
+					@tmp2=split("=","$_");
+					$SERVICE_NOTIFY=$tmp2[1];
+					print "\t\t\t\tNOTIFY:$SERVICE_NOTIFY\n";
+				}
+				if(/^EXECUTE=/) {
+					@tmp2=split("=","$_");
+					$SERVICE_EXECUTE=$tmp2[1];
+					print "\t\t\t\tEXECUTE:$SERVICE_EXECUTE\n";
+
+				# End ifs
+				}
+
+			# End for tmp	
+			}
+
+			if(!defined($justunit)) {
+				print "[$date,$time] [STOP] Stop $SERVICE -> $SERVICE_EXECUTE\n";
+				service_execute("$SERVICE_EXECUTE");
+			} else {
+
+				if("$justunit" eq "$SERVICE_UNIT") {
+					print "[$date,$time] [UNIT] Unit cycling used ($justunit = $SERVICE_UNIT)\n";
+					print "[$date,$time] [STOP] Stop $SERVICE -> $SERVICE_EXECUTE\n";
+					service_execute("$SERVICE_EXECUTE");
+				} else {
+					print "[$date,$time] [UNIT] Service $SERVICE skipped due to unit cycling ($justunit != $SERVICE_UNIT)\n";
+				}
+			}
+
+		# End if match
+		}
+	  
+		if(defined($toservice)) {
+
+			if ( "$toservice" == "$i") {
+				print "[$date,$time] [TOSERVICE] To service $toservice reached. Stopping cycle.\n";
+				last;
+	  		}
+		}
+
+	# End for services
+	}
+
+# End for servicemax
+}
+
+# End of subfunction
+}
+
+sub discover() {
+
+my $status = check_discover_with_master("$KEY:DISCOVER:$THIS_HOST:NONE:NONE:NONE");
+
+if($status == 0) {
+	print "[$date,$time] [DISCOVER] Discover complete. Master tells me to start.\n";
+        $action="start";
+	load_sysconfig_parameters();
+	check_if_master();
+	start_services();
+	exit(0);
+}
+if($status == 1) {
+	print "[$date,$time] [DISCOVER] Discover complete. Nothing to do.\n";
+	exit(0);
+}
+if($status == 2) {
+	print "[$date,$time] [DISCOVER] Discover complete. Master tells me to stop.\n";
+	exit(0);
+}
+if($status == 3) {
+	print "[$date,$time] [DISCOVER] Discover complete. Master tells me to restart.\n";
+	exit(0);
+}
+if($status == 4) {
+	print "[$date,$time] [DISCOVER] Discover complete. Master tells me to check status.\n";
+	exit(0);
+} else {
+	print "[$date,$time] [ERROR] Undefined Discover status recieved. Aborting!.\n";
+	exit(1);
+}
+
+
+# End of subfunction
+}
+
+sub status_services() {
+
+my @tmp;
+my @tmp2;
+
+for (my $i=0; $i <= $servicemax; $i++) {
+
+	for(@services) {
+		chomp;
+
+		if (/^SERVICE_$i/) {
+			print "[$date,$time] [INFO] Service $i found.\n";
+	  
+		if(defined($fromservice)) {
+
+			if ( "$i" < "$fromservice") {
+				print "[$date,$time] [FROMSERVICE] Fromservice service ($i) < $fromservice. Not yet there.\n";
+				next;
+	  		}
+		}
+
+			@tmp=split(",","$_");
+			for(@tmp) {
+
+				if(/^SERVICE_/) {
+					@tmp2=split("=","$_");
+					$SERVICE=$tmp2[1];
+					print "\t\t\t\tSERVICE:$SERVICE\n";
+				}
+				if(/^MODE=/) {
+					@tmp2=split("=","$_");
+					$SERVICE_MODE=$tmp2[1];
+					print "\t\t\t\tMODE:$SERVICE_MODE\n";
+				}
+				if(/^UNIT=/) {
+					@tmp2=split("=","$_");
+					$SERVICE_UNIT=$tmp2[1];
+					print "\t\t\t\tUNIT:$SERVICE_UNIT\n";
+				}
+				if(/^ONHOST=/) {
+					@tmp2=split("=","$_");
+					$SERVICE_REMOTE=$tmp2[1];
+					print "\t\t\t\tREMOTE:$SERVICE_REMOTE\n";
+				}
+				if(/^EXITOK=/) {
+					@tmp2=split("=","$_");
+					$SERVICE_EXITOK=$tmp2[1];
+					print "\t\t\t\tEXITOK:$SERVICE_EXITOK\n";
+				}
+				if(/^ONERROR=/) {
+					@tmp2=split("=","$_");
+					$SERVICE_ONERROR=$tmp2[1];
+					print "\t\t\t\tONERROR:$SERVICE_ONERROR\n";
+				}
+				if(/^NOTIFY=/) {
+					@tmp2=split("=","$_");
+					$SERVICE_NOTIFY=$tmp2[1];
+					print "\t\t\t\tNOTIFY:$SERVICE_NOTIFY\n";
+				}
+				if(/^EXECUTE=/) {
+					@tmp2=split("=","$_");
+					$SERVICE_EXECUTE=$tmp2[1];
+					print "\t\t\t\tEXECUTE:$SERVICE_EXECUTE\n";
+
+				# End ifs
+				}
+
+			# End for tmp	
+			}
+
+			if(!defined($justunit)) {
+				print "[$date,$time] [START] Status $SERVICE -> $SERVICE_EXECUTE\n";
+				service_execute("$SERVICE_EXECUTE");
+			} else {
+
+				if("$justunit" eq "$SERVICE_UNIT") {
+					print "[$date,$time] [UNIT] Unit cycling used ($justunit = $SERVICE_UNIT)\n";
+					print "[$date,$time] [START] Status $SERVICE -> $SERVICE_EXECUTE\n";
+					service_execute("$SERVICE_EXECUTE");
+				} else {
+					print "[$date,$time] [UNIT] Service $SERVICE skipped due to unit cycling ($justunit != $SERVICE_UNIT)\n";
+				}
+			}
+
+		# End if match
+		}
+
+	# End for services
+	}
+		
+	if(defined($toservice)) {
+
+	 	 if ("$toservice" == "$i") {
+			print "[$date,$time] [TOSERVICE] To service $toservice reached. Stopping cycle.\n";
+			last;
+	  	}
+	}
+
+# End for i
+}
+
+# End of subfunction
+}
+
+# Parse of commandline arguments.
+for(@ARGV) {
+        if ( $_ =~/^restart$/ ) {
+                $action="restart";
+        }
+        if ( $_ =~/^start$/ ) {
+                $action="start";
+        }
+        if ( $_ =~/^startlocal$/ ) {
+                $action="startlocal";
+        }
+        if ( $_ =~/^stop$/ ) {
+                $action="stop";
+        }
+        if ( $_ =~/^stoplocal$/ ) {
+                $action="stoplocal";
+        }
+        if ( $_ =~/^status$/ ) {
+                $action="status";
+        }
+        if ( $_ =~/^setup$/ ) {
+                $action="setup";
+        }
+        if ( $_ =~/^discover$/ ) {
+                $action="discover";
+        }
+        if ( $_ =~/^toservice=/ ) {
+                my @tmp=split("=","$_");
+                $toservice="$tmp[1]";
+        }
+        if ( $_ =~/^fromservice=/ ) {
+                my @tmp=split("=","$_");
+                $fromservice="$tmp[1]";
+        }
+        if ( $_ =~/^justunit=/ ) {
+                my @tmp=split("=","$_");
+                $justunit="$tmp[1]";
+        }
+}
+if(!defined($ARGV[0])) {
+        program_info();
+}
+if("$action" eq "start") {
+	load_sysconfig_parameters();
+	check_if_master();
+	start_services();
+	check_if_master();
+	exit;
+}
+if("$action" eq "startlocal") {
+	load_sysconfig_parameters();
+	check_if_master();
+	start_services();
+	check_if_master();
+	exit;
+}
+if("$action" eq "stop") {
+	load_sysconfig_parameters();
+	check_if_master();
+	stop_services();
+	check_if_master();
+	exit;
+}
+if("$action" eq "status") {
+	load_sysconfig_parameters();
+	check_if_master();
+	status_services();
+	check_if_master();
+	exit;
+}
+if("$action" eq "restart") {
+	$action="stop";
+	load_sysconfig_parameters();
+	check_if_master();
+	stop_services();
+	check_if_master();
+
+	@services= ();
+
+	$action="start";
+	load_sysconfig_parameters();
+	check_if_master();
+	start_services();
+	check_if_master();
+	exit;
+}
+if("$action" eq "stoplocal") {
+	load_sysconfig_parameters();
+	check_if_master();
+	stop_services();
+	check_if_master();
+	exit;
+}
+if("$action" eq "discover") {
+	load_sysconfig_parameters();
+	check_if_master();
+	discover();
+	exit;
+}
+if("$action" eq "setup") {
+	load_sysconfig_parameters();
+	setup_ssl();
+	exit;
+}
